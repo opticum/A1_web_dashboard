@@ -2,6 +2,7 @@
 import pandas as pd
 import streamlit as st
 import psycopg
+import pandas as pd
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Monitor_A1 - SPREADS", layout="wide")
@@ -60,15 +61,15 @@ def load_data():
     return df_spreads_inputs, df_mtm
 
 
+
+
 def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.DataFrame:
     df_spreads_inputs = df_spreads_inputs.copy()
 
-    # cleanup
     for c in ["instrument_1", "instrument_2", "instrument_fx"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = df_spreads_inputs[c].astype(str).str.strip()
 
-    # numeric safety
     for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
@@ -86,21 +87,15 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
 
     out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
 
-    # Value formula
-    # if fx_hedge = FALSE:
     base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
 
-    # if fx_hedge = TRUE:
-    # interpret your formula as dividing the second leg by (mtm_fx * mult_fx)
     denom = out["mtm_fx"] * out["mult_fx"]
     hedged_leg2 = (out["mtm_2"] * out["mult_2"]) / denom
     hedged = out["mtm_1"] * out["mult_1"] - hedged_leg2 + out["offset"]
 
-    out["Value"] = out["fx_hedge"].fillna(False).astype(bool).where(False, False)  # placeholder to keep dtype stable
-    out.loc[out["fx_hedge"].fillna(False) == False, "Value"] = base
-    out.loc[out["fx_hedge"].fillna(False) == True, "Value"] = hedged
+    fx = out["fx_hedge"].fillna(False).astype(bool)
+    out["Value"] = np.where(fx, hedged, base)
 
-    # Display columns (plus bounds for styling)
     out["ref1"] = out["mtm_1"]
     out["ref2"] = out["mtm_2"]
 
