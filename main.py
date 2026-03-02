@@ -34,7 +34,8 @@ def load_data():
         SELECT
             "desc",
             instrument_1, instrument_2,
-            mult_1, mult_2,
+            fx_hedge, instrument_fx,
+            mult_1, mult_2, mult_fx,
             "offset", "l_bnd", "u_bnd"
         FROM spreads_inputs
         ORDER BY "desc"
@@ -61,10 +62,14 @@ def load_data():
 
 def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.DataFrame:
     df_spreads_inputs = df_spreads_inputs.copy()
-    df_spreads_inputs["instrument_1"] = df_spreads_inputs["instrument_1"].astype(str).str.strip()
-    df_spreads_inputs["instrument_2"] = df_spreads_inputs["instrument_2"].astype(str).str.strip()
 
-    for c in ["mult_1", "mult_2", "offset", "l_bnd", "u_bnd"]:
+    # cleanup
+    for c in ["instrument_1", "instrument_2", "instrument_fx"]:
+        if c in df_spreads_inputs.columns:
+            df_spreads_inputs[c] = df_spreads_inputs[c].astype(str).str.strip()
+
+    # numeric safety
+    for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
 
@@ -77,17 +82,29 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     out = df_spreads_inputs.copy()
     out["mtm_1"] = out["instrument_1"].map(mtm_map)
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
+    out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
 
     out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
 
-    # Rule from your file:
-    out["Value"] = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"]
+    # Value formula
+    # if fx_hedge = FALSE:
+    base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
 
-    final = out[["Spread", "Value"]].copy()
-    final.insert(1, "SrcPrice1", out["mtm_1"])
-    final.insert(2, "SrcPrice2", out["mtm_2"])
-    return final
+    # if fx_hedge = TRUE:
+    # interpret your formula as dividing the second leg by (mtm_fx * mult_fx)
+    denom = out["mtm_fx"] * out["mult_fx"]
+    hedged_leg2 = (out["mtm_2"] * out["mult_2"]) / denom
+    hedged = out["mtm_1"] * out["mult_1"] - hedged_leg2 + out["offset"]
 
+    out["Value"] = out["fx_hedge"].fillna(False).astype(bool).where(False, False)  # placeholder to keep dtype stable
+    out.loc[out["fx_hedge"].fillna(False) == False, "Value"] = base
+    out.loc[out["fx_hedge"].fillna(False) == True, "Value"] = hedged
+
+    # Display columns (plus bounds for styling)
+    out["ref1"] = out["mtm_1"]
+    out["ref2"] = out["mtm_2"]
+
+    return out[["Spread", "Value", "ref1", "ref2", "l_bnd", "u_bnd"]]
 
 st.title("SPREADS")
 
@@ -99,5 +116,50 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-st.dataframe(df_spreads, use_container_width=True, hide_index=True)
+df_spreads = build_spreads(df_spreads_inputs, df_mtm)
+
+def style_spreads(df: pd.DataFrame):
+    def color_value(row):
+        v = row["Value"]
+        lb = row["l_bnd"]
+        ub = row["u_bnd"]
+        # only color the Value cell
+        styles = [""] * len(row)
+        if pd.notna(v) and pd.notna(lb) and v <= lb:
+            styles[df.index.get_loc(row.name)] = ""  # not used; keep for clarity
+        return styles
+
+    def value_cell_style(row):
+        v = row["Value"]
+        lb = row["l_bnd"]
+        ub = row["u_bnd"]
+        s = [""] * len(row)
+        # Apply only to the Value column
+        if pd.notna(v) and pd.notna(lb) and v <= lb:
+            s[row.index.get_loc("Value")] = "background-color: #b6f2b6;"  # green-ish
+        elif pd.notna(v) and pd.notna(ub) and v >= ub:
+            s[row.index.get_loc("Value")] = "background-color: #f7b1b1;"  # red-ish
+        return s
+
+    styler = (
+        df.style
+        .apply(value_cell_style, axis=1)
+        .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
+        .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
+    )
+
+    # Hide bounds columns (keep them for styling only)
+    try:
+        styler = styler.hide(axis="columns", subset=["l_bnd", "u_bnd"])
+    except Exception:
+        # older pandas: if hide isn't available, just leave them visible
+        pass
+
+    return styler
+
+st.title("SPREADS")
+
+# order exactly: Spread, Value, ref1, ref2 (bounds hidden if possible)
+st.dataframe(style_spreads(df_spreads), use_container_width=True)
+
 st.caption("Auto-refresh: 1s")
