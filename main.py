@@ -1,16 +1,31 @@
-# main.py
 import numpy as np
 import streamlit as st
 import psycopg
 import pandas as pd
+from decimal import Decimal
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Monitor_A1 - SPREADS", layout="wide")
 
-# Refresh the page every 1s
-st_autorefresh(interval=1000, key="spreads_refresh")
+# ----------------------------
+# Global parameters (sidebar)
+# ----------------------------
+st.sidebar.header("Settings")
+REFRESH_MS = st.sidebar.number_input(
+    "Refresh interval (ms)",
+    min_value=250,
+    max_value=60_000,
+    value=1000,
+    step=250,
+    help="How often the page refreshes. 1000 ms = 1 second.",
+)
 
+# Refresh the page
+st_autorefresh(interval=int(REFRESH_MS), key="spreads_refresh")
 
+# ----------------------------
+# DB connection
+# ----------------------------
 @st.cache_resource
 def get_conn():
     host = st.secrets["SUPABASE_DB_HOST"]
@@ -42,8 +57,9 @@ def load_data():
         ORDER BY "desc"
     """
 
+    # include mtm::text for decimal counting
     mtm_sql = """
-        SELECT id, mtm
+        SELECT id, mtm, mtm::text AS mtm_text
         FROM a1_md_all
     """
 
@@ -61,15 +77,28 @@ def load_data():
     return df_spreads_inputs, df_mtm
 
 
+# ----------------------------
+# Business logic
+# ----------------------------
+def decimals_ignoring_trailing_zeros(mtm_text: str) -> int:
+    if mtm_text is None:
+        return 0
+    s = str(mtm_text)
+    if "." not in s:
+        return 0
+    frac = s.split(".", 1)[1].rstrip("0")
+    return len(frac)
 
 
 def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.DataFrame:
     df_spreads_inputs = df_spreads_inputs.copy()
 
+    # cleanup strings
     for c in ["instrument_1", "instrument_2", "instrument_fx"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = df_spreads_inputs[c].astype(str).str.strip()
 
+    # numeric safety
     for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
@@ -77,32 +106,94 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     df_mtm = df_mtm.copy()
     df_mtm["id"] = df_mtm["id"].astype(str).str.strip()
     df_mtm["mtm"] = pd.to_numeric(df_mtm["mtm"], errors="coerce")
+    df_mtm["decimals"] = df_mtm["mtm_text"].map(decimals_ignoring_trailing_zeros)
 
+    # maps
     mtm_map = dict(zip(df_mtm["id"], df_mtm["mtm"]))
+    dec_map = dict(zip(df_mtm["id"], df_mtm["decimals"]))
 
     out = df_spreads_inputs.copy()
     out["mtm_1"] = out["instrument_1"].map(mtm_map)
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
     out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
 
+    # rounding rule: max(dec(instrument_1), dec(instrument_2))
+    out["dec_1"] = out["instrument_1"].map(dec_map).fillna(0).astype(int)
+    out["dec_2"] = out["instrument_2"].map(dec_map).fillna(0).astype(int)
+    out["round_dec"] = np.maximum(out["dec_1"], out["dec_2"]).astype(int)
+
     out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
 
+    # base value
     base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
 
+    # hedged value (as you confirmed)
     denom = out["mtm_fx"] * out["mult_fx"]
     hedged_leg2 = (out["mtm_2"] * out["mult_2"]) / denom
     hedged = out["mtm_1"] * out["mult_1"] - hedged_leg2 + out["offset"]
 
     fx = out["fx_hedge"].fillna(False).astype(bool)
-    out["Value"] = np.where(fx, hedged, base)
+    out["Value_raw"] = np.where(fx, hedged, base)
 
+    # apply dynamic rounding for display
+    out["Value"] = out.apply(
+        lambda r: round(r["Value_raw"], int(r["round_dec"])) if pd.notna(r["Value_raw"]) else r["Value_raw"],
+        axis=1,
+    )
+
+    # refs
     out["ref1"] = out["mtm_1"]
     out["ref2"] = out["mtm_2"]
 
+    # keep bounds for styling (we'll hide them later)
     return out[["Spread", "Value", "ref1", "ref2", "l_bnd", "u_bnd"]]
 
-st.title("SPREADS")
 
+# ----------------------------
+# Styling / display
+# ----------------------------
+def fmt_auto(x):
+    """Pretty numeric formatting: no float artifacts, no unnecessary trailing zeros."""
+    if pd.isna(x):
+        return ""
+    d = Decimal(str(x))
+    return format(d.normalize(), "f")
+
+
+def style_spreads(df: pd.DataFrame):
+    def value_cell_style(row):
+        v = row["Value"]
+        lb = row["l_bnd"]
+        ub = row["u_bnd"]
+        s = [""] * len(row)
+
+        # Apply only to the Value column
+        if pd.notna(v) and pd.notna(lb) and v <= lb:
+            s[row.index.get_loc("Value")] = "background-color: #b6f2b6;"  # green
+        elif pd.notna(v) and pd.notna(ub) and v >= ub:
+            s[row.index.get_loc("Value")] = "background-color: #f7b1b1;"  # red
+        return s
+
+    styler = (
+        df.style
+        .apply(value_cell_style, axis=1)
+        .format({"Value": fmt_auto, "ref1": fmt_auto, "ref2": fmt_auto})
+        .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
+        .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
+    )
+
+    # Hide bounds columns (kept only for styling)
+    try:
+        styler = styler.hide(axis="columns", subset=["l_bnd", "u_bnd"])
+    except Exception:
+        pass
+
+    return styler
+
+
+# ----------------------------
+# Main
+# ----------------------------
 try:
     df_spreads_inputs, df_mtm = load_data()
     df_spreads = build_spreads(df_spreads_inputs, df_mtm)
@@ -111,50 +202,5 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-df_spreads = build_spreads(df_spreads_inputs, df_mtm)
-
-def style_spreads(df: pd.DataFrame):
-    def color_value(row):
-        v = row["Value"]
-        lb = row["l_bnd"]
-        ub = row["u_bnd"]
-        # only color the Value cell
-        styles = [""] * len(row)
-        if pd.notna(v) and pd.notna(lb) and v <= lb:
-            styles[df.index.get_loc(row.name)] = ""  # not used; keep for clarity
-        return styles
-
-    def value_cell_style(row):
-        v = row["Value"]
-        lb = row["l_bnd"]
-        ub = row["u_bnd"]
-        s = [""] * len(row)
-        # Apply only to the Value column
-        if pd.notna(v) and pd.notna(lb) and v <= lb:
-            s[row.index.get_loc("Value")] = "background-color: #b6f2b6;"  # green-ish
-        elif pd.notna(v) and pd.notna(ub) and v >= ub:
-            s[row.index.get_loc("Value")] = "background-color: #f7b1b1;"  # red-ish
-        return s
-
-    styler = (
-        df.style
-        .apply(value_cell_style, axis=1)
-        .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
-        .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
-    )
-
-    # Hide bounds columns (keep them for styling only)
-    try:
-        styler = styler.hide(axis="columns", subset=["l_bnd", "u_bnd"])
-    except Exception:
-        # older pandas: if hide isn't available, just leave them visible
-        pass
-
-    return styler
-
-st.title("SPREADS")
-
-# order exactly: Spread, Value, ref1, ref2 (bounds hidden if possible)
 st.dataframe(style_spreads(df_spreads), use_container_width=True)
-
-st.caption("Auto-refresh: 1s")
+st.caption(f"Auto-refresh: {int(REFRESH_MS)} ms")
