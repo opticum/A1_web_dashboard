@@ -125,16 +125,9 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     # Default spread name = instrument_1-instrument_2
     default_spread = out["instrument_1"] + "-" + out["instrument_2"]
 
-    # If desc_custom is not null and not blank, use it
-    if "desc_custom" in out.columns:
-        custom = out["desc_custom"].astype(str).str.strip()
-        out["Spread"] = np.where(
-            custom.notna() & (custom != "") & (custom.str.lower() != "nan"),
-            custom,
-            default_spread
-        )
-    else:
-        out["Spread"] = default_spread
+    # Use desc_custom if not null/blank, otherwise default
+    custom = out.get("desc_custom", "").fillna("").astype(str).str.strip()
+    out["Spread"] = np.where(custom != "", custom, default_spread)
 
     # base value
     base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
