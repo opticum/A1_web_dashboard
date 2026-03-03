@@ -54,7 +54,6 @@ def load_data():
             mult_1, mult_2, mult_fx,
             "offset", "l_bnd", "u_bnd"
         FROM spreads_inputs
-        ORDER BY instrument_1, instrument_2
     """
 
     # include mtm::text for decimal counting
