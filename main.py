@@ -49,6 +49,7 @@ def load_data():
     spreads_inputs_sql = """
         SELECT
             "desc",
+            desc_custom,
             instrument_1, instrument_2,
             fx_hedge, instrument_fx,
             mult_1, mult_2, mult_fx,
@@ -113,6 +114,16 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     dec_map = dict(zip(df_mtm["id"], df_mtm["decimals"]))
 
     out = df_spreads_inputs.copy()
+
+    # Replace desc with desc_custom if present and not empty
+    if "desc_custom" in out.columns:
+        out["desc_effective"] = out["desc_custom"].where(
+            out["desc_custom"].notna() & (out["desc_custom"].astype(str).str.strip() != ""),
+            out["desc"]
+        )
+    else:
+        out["desc_effective"] = out["desc"]
+
     out["mtm_1"] = out["instrument_1"].map(mtm_map)
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
     out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
@@ -122,7 +133,8 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     out["dec_2"] = out["instrument_2"].map(dec_map).fillna(0).astype(int)
     out["round_dec"] = np.maximum(out["dec_1"], out["dec_2"]).astype(int)
 
-    out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
+    # out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
+    out["Spread"] = out["desc_effective"]
 
     # base value
     base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
