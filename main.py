@@ -52,6 +52,7 @@ def load_data():
             instrument_1, instrument_2,
             fx_hedge, instrument_fx,
             mult_1, mult_2, mult_fx,
+            spread_dec,
             "offset", "l_bnd", "u_bnd"
         FROM spreads_inputs
     """
@@ -98,7 +99,7 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
             df_spreads_inputs[c] = df_spreads_inputs[c].astype(str).str.strip()
 
     # numeric safety
-    for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd"]:
+    for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd", "spread_dec"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
 
@@ -116,10 +117,6 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
     out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
 
-    # rounding rule: max(dec(instrument_1), dec(instrument_2))
-    out["dec_1"] = out["instrument_1"].map(dec_map).fillna(0).astype(int)
-    out["dec_2"] = out["instrument_2"].map(dec_map).fillna(0).astype(int)
-    out["round_dec"] = np.maximum(out["dec_1"], out["dec_2"]).astype(int)
 
     # Default spread name = instrument_1-instrument_2
     default_spread = out["instrument_1"] + "-" + out["instrument_2"]
@@ -139,29 +136,31 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     fx = out["fx_hedge"].fillna(False).astype(bool)
     out["Value_raw"] = np.where(fx, hedged, base)
 
-    # apply dynamic rounding for display
+    # decimals from table (NULL -> default 2)
+    out["spread_dec"] = pd.to_numeric(out["spread_dec"], errors="coerce").fillna(2).astype(int)
+
     out["Value"] = out.apply(
-        lambda r: round(r["Value_raw"], int(r["round_dec"])) if pd.notna(r["Value_raw"]) else r["Value_raw"],
-        axis=1,
+        lambda r: round(r["Value_raw"], r["spread_dec"]) if pd.notna(r["Value_raw"]) else r["Value_raw"],
+        axis=1
     )
 
     # refs
     out["ref1"] = out["mtm_1"]
     out["ref2"] = out["mtm_2"]
+    out["Value"] = out.apply(lambda r: float(f"{r['Value']:.{r['spread_dec']}f}"), axis=1)
 
     # keep bounds for styling (we'll hide them later)
+
     return out[["Spread", "Value", "ref1", "ref2", "l_bnd", "u_bnd"]]
 
 
 # ----------------------------
 # Styling / display
 # ----------------------------
-def fmt_auto(x):
-    """Pretty numeric formatting: no float artifacts, no unnecessary trailing zeros."""
-    if pd.isna(x):
+def fmt_value(val, dec):
+    if pd.isna(val):
         return ""
-    d = Decimal(str(x))
-    return format(d.normalize(), "f")
+    return f"{val:.{dec}f}"
 
 
 def style_spreads(df: pd.DataFrame):
@@ -181,7 +180,11 @@ def style_spreads(df: pd.DataFrame):
     styler = (
         df.style
         .apply(value_cell_style, axis=1)
-        .format({"Value": fmt_auto, "ref1": fmt_auto, "ref2": fmt_auto})
+        .format({
+            "Value": lambda v: v,
+            "ref1": lambda v: v,
+            "ref2": lambda v: v
+        })
         .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
         .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
     )
