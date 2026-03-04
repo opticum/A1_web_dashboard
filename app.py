@@ -28,12 +28,13 @@ def load_data():
 
     spreads_inputs_sql = """
         SELECT
-            "desc",
+            desc_custom,
             instrument_1, instrument_2,
-            mult_1, mult_2,
+            fx_hedge, instrument_fx,
+            mult_1, mult_2, mult_fx,
+            spread_dec,
             "offset", "l_bnd", "u_bnd"
         FROM spreads_inputs
-        ORDER BY "desc"
     """
 
     # IMPORTANT: match spreads_inputs.instrument_* to a1_md_all.id
@@ -61,7 +62,7 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     df_spreads_inputs["instrument_2"] = df_spreads_inputs["instrument_2"].astype(str).str.strip()
 
     # numeric safety
-    for c in ["mult_1", "mult_2", "offset", "l_bnd", "u_bnd"]:
+    for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd", "spread_dec"]:
         if c in df_spreads_inputs.columns:
             df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
 
@@ -73,13 +74,23 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     mtm_map = dict(zip(df_mtm["id"], df_mtm["mtm"]))
 
     out = df_spreads_inputs.copy()
+    out["spread_dec"] = out["spread_dec"].fillna(2).astype(int)
     out["mtm_1"] = out["instrument_1"].map(mtm_map)
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
 
     out["Spread"] = out["instrument_1"] + "-" + out["instrument_2"]
 
     # Your rule:
-    out["Value"] = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"]
+    out["Value_raw"] = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"]
+
+    # decimals for display: spread_dec (NULL -> default 2)
+    out["spread_dec"] = out["spread_dec"].fillna(2).astype(int)
+
+    # rounded Value (0 => no decimals, 1 => 1 decimal, etc.)
+    out["Value"] = out.apply(
+        lambda r: round(r["Value_raw"], int(r["spread_dec"])) if pd.notna(r["Value_raw"]) else r["Value_raw"],
+        axis=1
+    )
 
     # Debug flags if something doesn't match
     out["Missing_mtm_1"] = out["mtm_1"].isna()
@@ -93,8 +104,12 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
 
     # Final table: only what you want to display
     final = out[["Spread", "Value"]].copy()
-    final.insert(1, "SrcPrice1", out["mtm_1"])
-    final.insert(2, "SrcPrice2", out["mtm_2"])
+    final["ref1"] = out["mtm_1"]
+    final["ref2"] = out["mtm_2"]
+
+    # enforce column order
+    final = final[["Spread", "Value", "ref1", "ref2"]]
+
     return final
 
 st.title("SPREADS")
