@@ -35,6 +35,7 @@ def load_data():
             spread_dec,
             "offset", "l_bnd", "u_bnd"
         FROM spreads_inputs
+        ORDER BY "desc"
     """
 
     # IMPORTANT: match spreads_inputs.instrument_* to a1_md_all.id
