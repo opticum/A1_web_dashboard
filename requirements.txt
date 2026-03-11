@@ -3,3 +3,4 @@ pandas
 numpy
 psycopg[binary]
 streamlit-autorefresh
+Babel
