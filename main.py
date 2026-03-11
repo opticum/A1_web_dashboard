@@ -40,7 +40,7 @@ def get_conn():
 
 
 # --------------------------------------------------
-# Helpers
+# Formatting helpers
 # --------------------------------------------------
 def fmt_auto(x):
     if pd.isna(x):
@@ -73,7 +73,7 @@ def load_spreads_data():
             mult_1, mult_2, mult_fx,
             spread_dec,
             "offset", "l_bnd", "u_bnd"
-        FROM spreads_inputs
+        FROM public.spreads_inputs
         ORDER BY "desc"
     """
 
@@ -81,7 +81,7 @@ def load_spreads_data():
         SELECT
             id,
             mtm
-        FROM a1_md_all
+        FROM public.a1_md_all
     """
 
     with conn.cursor() as cur:
@@ -99,40 +99,30 @@ def load_spreads_data():
 
 
 def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.DataFrame:
-    df_spreads_inputs = df_spreads_inputs.copy()
+    out = df_spreads_inputs.copy()
     df_mtm = df_mtm.copy()
 
-    # string cleanup
     for c in ["instrument_1", "instrument_2", "instrument_fx", "desc_custom", "desc"]:
-        if c in df_spreads_inputs.columns:
-            df_spreads_inputs[c] = df_spreads_inputs[c].astype(str)
+        if c in out.columns:
+            out[c] = out[c].fillna("").astype(str).str.strip()
 
-    for c in ["instrument_1", "instrument_2", "instrument_fx"]:
-        if c in df_spreads_inputs.columns:
-            df_spreads_inputs[c] = df_spreads_inputs[c].str.strip()
-
-    # numeric cleanup
     for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd", "spread_dec"]:
-        if c in df_spreads_inputs.columns:
-            df_spreads_inputs[c] = pd.to_numeric(df_spreads_inputs[c], errors="coerce")
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
 
     df_mtm["id"] = df_mtm["id"].astype(str).str.strip()
     df_mtm["mtm"] = pd.to_numeric(df_mtm["mtm"], errors="coerce")
 
     mtm_map = dict(zip(df_mtm["id"], df_mtm["mtm"]))
 
-    out = df_spreads_inputs.copy()
-
     out["mtm_1"] = out["instrument_1"].map(mtm_map)
     out["mtm_2"] = out["instrument_2"].map(mtm_map)
     out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
 
-    # display name
     default_spread = out["instrument_1"] + "-" + out["instrument_2"]
     custom = out["desc_custom"].fillna("").astype(str).str.strip()
     out["Spread"] = np.where(custom != "", custom, default_spread)
 
-    # calculations
     base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
 
     denom = out["mtm_fx"] * out["mult_fx"]
@@ -142,10 +132,8 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     fx = out["fx_hedge"].fillna(False).astype(bool)
     out["Value_num"] = np.where(fx, hedged, base)
 
-    # decimals: NULL -> 2
     out["spread_dec"] = pd.to_numeric(out["spread_dec"], errors="coerce").fillna(2).astype(int)
 
-    # exact display formatting
     out["Value"] = out.apply(
         lambda r: fmt_fixed(r["Value_num"], r["spread_dec"]) if pd.notna(r["Value_num"]) else "",
         axis=1
@@ -154,7 +142,6 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     out["ref1"] = out["mtm_1"]
     out["ref2"] = out["mtm_2"]
 
-    # preserve SQL order from ORDER BY "desc"
     return out[["Spread", "Value", "ref1", "ref2", "Value_num", "l_bnd", "u_bnd"]]
 
 
@@ -199,17 +186,17 @@ def load_open_interest_data():
 
     inputs_sql = """
         SELECT instrument_code
-        FROM open_interest_unputs
+        FROM public.open_interest_inputs
     """
 
     md_sql = """
         SELECT id, open_interest
-        FROM a1_md_all
+        FROM public.a1_md_all
     """
 
     snapshot_sql = """
         SELECT instrument_code, oi
-        FROM fut_oi_snapshot
+        FROM public.fut_oi_snapshot
     """
 
     with conn.cursor() as cur:
@@ -232,11 +219,11 @@ def load_open_interest_data():
 
 
 def build_open_interest(df_inputs: pd.DataFrame, df_md: pd.DataFrame, df_snapshot: pd.DataFrame) -> pd.DataFrame:
-    df_inputs = df_inputs.copy()
+    out = df_inputs.copy()
     df_md = df_md.copy()
     df_snapshot = df_snapshot.copy()
 
-    df_inputs["instrument_code"] = df_inputs["instrument_code"].astype(str).str.strip()
+    out["instrument_code"] = out["instrument_code"].astype(str).str.strip()
 
     df_md["id"] = df_md["id"].astype(str).str.strip()
     df_md["open_interest"] = pd.to_numeric(df_md["open_interest"], errors="coerce")
@@ -246,8 +233,6 @@ def build_open_interest(df_inputs: pd.DataFrame, df_md: pd.DataFrame, df_snapsho
 
     md_map = dict(zip(df_md["id"], df_md["open_interest"]))
     prev_map = dict(zip(df_snapshot["instrument_code"], df_snapshot["oi"]))
-
-    out = df_inputs.copy()
 
     out["md_id"] = "MOEX:" + out["instrument_code"]
     out["Open Interest"] = out["md_id"].map(md_map)
