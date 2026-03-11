@@ -199,7 +199,7 @@ def load_open_interest_data():
 
     inputs_sql = """
         SELECT instrument_code
-        FROM open_interest_unputs
+        FROM open_interest_inputs
     """
 
     md_sql = """
