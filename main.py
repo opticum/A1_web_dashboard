@@ -162,7 +162,7 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     out["ref1"] = out["mtm_1"]
     out["ref2"] = out["mtm_2"]
 
-    return out[["Spread", "Value", "ref1", "ref2", "l_bnd", "u_bnd"]]
+    return out[["Spread", "Value", "ref1", "ref2", "Value_num", "l_bnd", "u_bnd"]]
 
 
 def style_spreads(df: pd.DataFrame):
