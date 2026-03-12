@@ -166,20 +166,26 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
 
 
 def style_spreads(df: pd.DataFrame):
+    visible_df = df[["Spread", "Value", "ref1", "ref2"]].copy()
+
     def value_cell_style(row):
-        v = row["Value_num"]
-        lb = row["l_bnd"]
-        ub = row["u_bnd"]
+        # use the original df (with hidden helper columns) by row index
+        raw_row = df.loc[row.name]
+        v = raw_row["Value_num"]
+        lb = raw_row["l_bnd"]
+        ub = raw_row["u_bnd"]
+
         s = [""] * len(row)
 
         if pd.notna(v) and pd.notna(lb) and v <= lb:
             s[row.index.get_loc("Value")] = "background-color: #b6f2b6;"
         elif pd.notna(v) and pd.notna(ub) and v >= ub:
             s[row.index.get_loc("Value")] = "background-color: #f7b1b1;"
+
         return s
 
     styler = (
-        df.style
+        visible_df.style
         .apply(value_cell_style, axis=1)
         .format({
             "ref1": fmt_auto,
@@ -188,11 +194,6 @@ def style_spreads(df: pd.DataFrame):
         .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
         .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
     )
-
-    try:
-        styler = styler.hide(axis="columns", subset=["Value_num", "l_bnd", "u_bnd"])
-    except Exception:
-        pass
 
     return styler
 
