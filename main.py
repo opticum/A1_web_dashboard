@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import psycopg
 import streamlit as st
-from babel.numbers import format_decimal
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Monitor_A1", layout="wide")
@@ -11,8 +10,6 @@ st.set_page_config(page_title="Monitor_A1", layout="wide")
 # Global settings
 # --------------------------------------------------
 REFRESH_MS = 10000  # 10 seconds
-APP_LOCALE = "en_US"  # examples: en_US, ru_RU, de_DE
-
 st_autorefresh(interval=REFRESH_MS, key="global_refresh")
 
 # Sidebar navigation
@@ -63,7 +60,13 @@ def fmt_fixed(x, decimals):
 def fmt_localized(x):
     if pd.isna(x):
         return ""
-    return format_decimal(x, locale=APP_LOCALE)
+    return f"{x:,.0f}"
+
+
+def fmt_percent(x):
+    if pd.isna(x):
+        return ""
+    return f"{round(x * 100):.0f}%"
 
 
 # --------------------------------------------------
@@ -248,19 +251,37 @@ def build_open_interest(df_inputs: pd.DataFrame, df_md: pd.DataFrame, df_snapsho
     out["Open Interest Prev"] = out["instrument_code"].map(prev_map)
     out["Change"] = out["Open Interest"] - out["Open Interest Prev"]
 
+    max_oi = out[["Open Interest", "Open Interest Prev"]].max(axis=1)
+    out["Change %"] = np.where(
+        max_oi > 0,
+        out["Change"].abs() / max_oi,
+        np.nan
+    )
+
     out = out.rename(columns={"instrument_code": "Instrument"})
 
-    return out[["Instrument", "Change", "Open Interest", "Open Interest Prev"]]
+    return out[["Instrument", "Change", "Change %", "Open Interest", "Open Interest Prev"]]
 
 
 def style_open_interest(df: pd.DataFrame):
+    def change_font_style(val):
+        if pd.isna(val):
+            return ""
+        if val < 0:
+            return "color: red;"
+        if val > 0:
+            return "color: darkgreen;"
+        return ""
+
     styler = (
         df.style
         .format({
             "Change": fmt_localized,
+            "Change %": fmt_percent,
             "Open Interest": fmt_localized,
             "Open Interest Prev": fmt_localized,
         })
+        .map(change_font_style, subset=["Change"])
     )
     return styler
 
