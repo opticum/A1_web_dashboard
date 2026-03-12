@@ -142,7 +142,15 @@ def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.D
     hedged = out["mtm_1"] * out["mult_1"] - hedged_leg2 + out["offset"]
 
     fx = out["fx_hedge"].fillna(False).astype(bool)
-    out["Value_num"] = np.where(fx, hedged, base)
+
+    calc_value = np.where(fx, hedged, base)
+
+    # apply rule: if ref1 <=0 or ref2 <=0 → NULL
+    out["Value_num"] = np.where(
+        (out["mtm_1"] <= 0) | (out["mtm_2"] <= 0),
+        np.nan,
+        calc_value
+    )
 
     out["spread_dec"] = pd.to_numeric(out["spread_dec"], errors="coerce").fillna(2).astype(int)
 
