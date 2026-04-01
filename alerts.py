@@ -5,6 +5,8 @@ import streamlit as st
 from db import get_conn
 from formatters import fmt_auto
 
+MAX_ALERTS = 1
+
 
 @st.cache_resource
 def initialize_alert_counters_once():
@@ -74,7 +76,7 @@ def process_spread_alerts(df: pd.DataFrame):
         if pd.isna(value_num):
             continue
 
-        if alert_counter >= 2:
+        if alert_counter >= MAX_ALERTS:
             continue
 
         if pd.notna(u_bnd) and value_num >= u_bnd:
