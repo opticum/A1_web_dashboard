@@ -4,3 +4,4 @@ numpy
 psycopg[binary]
 streamlit-autorefresh
 Babel
+requests

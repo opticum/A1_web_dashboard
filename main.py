@@ -1,314 +1,64 @@
-import numpy as np
-import pandas as pd
-import psycopg
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+from alerts import initialize_alert_counters_once, reset_all_alert_counters
+from open_interest import render_open_interest_page
+from spreads import render_spreads_page
+
+
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.stop()
+
+    elif not st.session_state["password_correct"]:
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+        st.error("Incorrect password")
+        st.stop()
+
+
+check_password()
+
 st.set_page_config(page_title="Monitor_A1", layout="wide")
 
-# --------------------------------------------------
-# Global settings
-# --------------------------------------------------
 REFRESH_MS = 10000  # 10 seconds
 st_autorefresh(interval=REFRESH_MS, key="global_refresh")
 
-# Sidebar navigation
+try:
+    initialize_alert_counters_once()
+except Exception as e:
+    st.error("Failed to initialize alert counters.")
+    st.exception(e)
+    st.stop()
+
 st.sidebar.header("Tables")
 page = st.sidebar.radio(
     "Select table",
     ["Spreads", "Open Interest"],
-    index=0
+    index=0,
 )
 
-# --------------------------------------------------
-# DB connection
-# --------------------------------------------------
-@st.cache_resource
-def get_conn():
-    host = st.secrets["SUPABASE_DB_HOST"]
-    port = st.secrets.get("SUPABASE_DB_PORT", "5432")
-    dbname = st.secrets.get("SUPABASE_DB_NAME", "postgres")
-    user = st.secrets.get("SUPABASE_DB_USER", "postgres")
-    password = st.secrets["SUPABASE_DB_PASSWORD"]
-    sslmode = st.secrets.get("SUPABASE_DB_SSLMODE", "require")
+st.sidebar.divider()
+if st.sidebar.button("Reset Telegram Counters", use_container_width=True):
+    try:
+        reset_all_alert_counters()
+        st.sidebar.success("All alert counters reset to 0")
+    except Exception as e:
+        st.sidebar.error("Failed to reset counters")
+        st.exception(e)
 
-    conn_str = (
-        f"host={host} port={port} dbname={dbname} user={user} "
-        f"password={password} sslmode={sslmode}"
-    )
-    return psycopg.connect(conn_str)
-
-
-# --------------------------------------------------
-# Formatting helpers
-# --------------------------------------------------
-def fmt_auto(x):
-    if pd.isna(x):
-        return ""
-    x = float(x)
-    if x.is_integer():
-        return str(int(x))
-    return f"{x:,.10f}".rstrip("0").rstrip(".")
-
-
-def fmt_fixed(x, decimals):
-    if pd.isna(x):
-        return ""
-    return f"{float(x):.{int(decimals)}f}"
-
-
-def fmt_localized(x):
-    if pd.isna(x):
-        return ""
-    return f"{x:,.0f}"
-
-
-def fmt_percent(x):
-    if pd.isna(x):
-        return ""
-    return f"{round(x * 100):.0f}%"
-
-
-# --------------------------------------------------
-# SPREADS
-# --------------------------------------------------
-@st.cache_data(ttl=1)
-def load_spreads_data():
-    conn = get_conn()
-
-    spreads_inputs_sql = """
-        SELECT
-            "desc",
-            desc_custom,
-            instrument_1, instrument_2,
-            fx_hedge, instrument_fx,
-            mult_1, mult_2, mult_fx,
-            spread_dec,
-            "offset", "l_bnd", "u_bnd"
-        FROM public.spreads_inputs
-        ORDER BY "desc"
-    """
-
-    mtm_sql = """
-        SELECT
-            id,
-            mtm
-        FROM public.a1_md_all
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(spreads_inputs_sql)
-        s_rows = cur.fetchall()
-        s_cols = [d[0] for d in cur.description]
-        df_spreads_inputs = pd.DataFrame(s_rows, columns=s_cols)
-
-        cur.execute(mtm_sql)
-        m_rows = cur.fetchall()
-        m_cols = [d[0] for d in cur.description]
-        df_mtm = pd.DataFrame(m_rows, columns=m_cols)
-
-    return df_spreads_inputs, df_mtm
-
-
-def build_spreads(df_spreads_inputs: pd.DataFrame, df_mtm: pd.DataFrame) -> pd.DataFrame:
-    out = df_spreads_inputs.copy()
-    df_mtm = df_mtm.copy()
-
-    for c in ["instrument_1", "instrument_2", "instrument_fx", "desc_custom", "desc"]:
-        if c in out.columns:
-            out[c] = out[c].fillna("").astype(str).str.strip()
-
-    for c in ["mult_1", "mult_2", "mult_fx", "offset", "l_bnd", "u_bnd", "spread_dec"]:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors="coerce")
-
-    df_mtm["id"] = df_mtm["id"].astype(str).str.strip()
-    df_mtm["mtm"] = pd.to_numeric(df_mtm["mtm"], errors="coerce")
-
-    mtm_map = dict(zip(df_mtm["id"], df_mtm["mtm"]))
-
-    out["mtm_1"] = out["instrument_1"].map(mtm_map)
-    out["mtm_2"] = out["instrument_2"].map(mtm_map)
-    out["mtm_fx"] = out["instrument_fx"].map(mtm_map)
-
-    default_spread = out["instrument_1"] + "-" + out["instrument_2"]
-    custom = out["desc_custom"].fillna("").astype(str).str.strip()
-    out["Spread"] = np.where(custom != "", custom, default_spread)
-
-    base = out["mtm_1"] * out["mult_1"] - out["mtm_2"] * out["mult_2"] + out["offset"]
-
-    denom = out["mtm_fx"] * out["mult_fx"]
-    hedged_leg2 = (out["mtm_2"] * out["mult_2"]) / denom
-    hedged = out["mtm_1"] * out["mult_1"] - hedged_leg2 + out["offset"]
-
-    fx = out["fx_hedge"].fillna(False).astype(bool)
-
-    calc_value = np.where(fx, hedged, base)
-
-    # apply rule: if ref1 <=0 or ref2 <=0 → NULL
-    out["Value_num"] = np.where(
-        (out["mtm_1"] <= 0) | (out["mtm_2"] <= 0),
-        np.nan,
-        calc_value
-    )
-
-    out["spread_dec"] = pd.to_numeric(out["spread_dec"], errors="coerce").fillna(2).astype(int)
-
-    out["Value"] = out.apply(
-        lambda r: fmt_fixed(r["Value_num"], r["spread_dec"]) if pd.notna(r["Value_num"]) else "",
-        axis=1
-    )
-
-    out["ref1"] = out["mtm_1"]
-    out["ref2"] = out["mtm_2"]
-
-    return out[["Spread", "Value", "ref1", "ref2", "Value_num", "l_bnd", "u_bnd"]]
-
-
-def style_spreads(df: pd.DataFrame):
-    visible_df = df[["Spread", "Value", "ref1", "ref2"]].copy()
-
-    def value_cell_style(row):
-        # use the original df (with hidden helper columns) by row index
-        raw_row = df.loc[row.name]
-        v = raw_row["Value_num"]
-        lb = raw_row["l_bnd"]
-        ub = raw_row["u_bnd"]
-
-        s = [""] * len(row)
-
-        if pd.notna(v) and pd.notna(lb) and v <= lb:
-            s[row.index.get_loc("Value")] = "background-color: #b6f2b6;"
-        elif pd.notna(v) and pd.notna(ub) and v >= ub:
-            s[row.index.get_loc("Value")] = "background-color: #f7b1b1;"
-
-        return s
-
-    styler = (
-        visible_df.style
-        .apply(value_cell_style, axis=1)
-        .format({
-            "ref1": fmt_auto,
-            "ref2": fmt_auto,
-        })
-        .set_properties(subset=["Value"], **{"font-weight": "bold", "font-size": "120%"})
-        .set_properties(subset=["ref1", "ref2"], **{"font-style": "italic"})
-    )
-
-    return styler
-
-
-# --------------------------------------------------
-# OPEN INTEREST
-# --------------------------------------------------
-@st.cache_data(ttl=1)
-def load_open_interest_data():
-    conn = get_conn()
-
-    inputs_sql = """
-        SELECT instrument_code
-        FROM public.open_interest_inputs
-    """
-
-    md_sql = """
-        SELECT id, open_interest
-        FROM public.a1_md_all
-    """
-
-    snapshot_sql = """
-        SELECT instrument_code, oi
-        FROM public.fut_oi_snapshot
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(inputs_sql)
-        i_rows = cur.fetchall()
-        i_cols = [d[0] for d in cur.description]
-        df_inputs = pd.DataFrame(i_rows, columns=i_cols)
-
-        cur.execute(md_sql)
-        md_rows = cur.fetchall()
-        md_cols = [d[0] for d in cur.description]
-        df_md = pd.DataFrame(md_rows, columns=md_cols)
-
-        cur.execute(snapshot_sql)
-        s_rows = cur.fetchall()
-        s_cols = [d[0] for d in cur.description]
-        df_snapshot = pd.DataFrame(s_rows, columns=s_cols)
-
-    return df_inputs, df_md, df_snapshot
-
-
-def build_open_interest(df_inputs: pd.DataFrame, df_md: pd.DataFrame, df_snapshot: pd.DataFrame) -> pd.DataFrame:
-    out = df_inputs.copy()
-    df_md = df_md.copy()
-    df_snapshot = df_snapshot.copy()
-
-    out["instrument_code"] = out["instrument_code"].astype(str).str.strip()
-
-    df_md["id"] = df_md["id"].astype(str).str.strip()
-    df_md["open_interest"] = pd.to_numeric(df_md["open_interest"], errors="coerce")
-
-    df_snapshot["instrument_code"] = df_snapshot["instrument_code"].astype(str).str.strip()
-    df_snapshot["oi"] = pd.to_numeric(df_snapshot["oi"], errors="coerce")
-
-    md_map = dict(zip(df_md["id"], df_md["open_interest"]))
-    prev_map = dict(zip(df_snapshot["instrument_code"], df_snapshot["oi"]))
-
-    out["md_id"] = "MOEX:" + out["instrument_code"]
-    out["Open Interest"] = out["md_id"].map(md_map)
-    out["Open Interest Prev"] = out["instrument_code"].map(prev_map)
-    out["Change"] = out["Open Interest"] - out["Open Interest Prev"]
-
-    max_oi = out[["Open Interest", "Open Interest Prev"]].max(axis=1)
-    out["Change %"] = np.where(
-        max_oi > 0,
-        out["Change"].abs() / max_oi,
-        np.nan
-    )
-
-    out = out.rename(columns={"instrument_code": "Instrument"})
-
-    return out[["Instrument", "Change", "Change %", "Open Interest", "Open Interest Prev"]]
-
-
-def style_open_interest(df: pd.DataFrame):
-    def change_font_style(val):
-        if pd.isna(val):
-            return ""
-        if val < 0:
-            return "color: red;"
-        if val > 0:
-            return "color: darkgreen;"
-        return ""
-
-    styler = (
-        df.style
-        .format({
-            "Change": fmt_localized,
-            "Change %": fmt_percent,
-            "Open Interest": fmt_localized,
-            "Open Interest Prev": fmt_localized,
-        })
-        .map(change_font_style, subset=["Change"])
-    )
-    return styler
-
-
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
 try:
     if page == "Spreads":
-        df_spreads_inputs, df_mtm = load_spreads_data()
-        df_spreads = build_spreads(df_spreads_inputs, df_mtm)
-        st.dataframe(style_spreads(df_spreads), use_container_width=True)
-
+        render_spreads_page()
     elif page == "Open Interest":
-        df_inputs, df_md, df_snapshot = load_open_interest_data()
-        df_oi = build_open_interest(df_inputs, df_md, df_snapshot)
-        st.dataframe(style_open_interest(df_oi), use_container_width=True)
-
+        render_open_interest_page()
 except Exception as e:
     st.error("Failed to load data from Supabase.")
     st.exception(e)
